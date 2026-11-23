@@ -1,0 +1,123 @@
+name: vr-apk
+# Builds the VR (Meta Quest / PICO) APK only. The steps mirror the build-android job in vpinball.yml,
+# with the vr flavor, OpenXR enabled and the VR menu shell (libvrshell.so) added.
+on:
+  push:
+    branches: [ vr-apk-build ]
+  workflow_dispatch:
+
+env:
+  VERSION_START_SHA: ea558e7417f6f06fe567d34f0e33792a141b8e64
+  BUILD_CONFIG: Release
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build VPinballX_BGFX-android-vr-Release
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          sudo apt install bison
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Select NDK
+        run: |
+          NDK=/usr/local/lib/android/sdk/ndk/28.2.13676358
+          if [[ ! -d "$NDK" ]]; then
+            NDK="${ANDROID_NDK_LATEST_HOME}"
+          fi
+          echo "Using NDK: $NDK"
+          echo "ANDROID_NDK=$NDK" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK" >> $GITHUB_ENV
+      - id: version
+        name: Version
+        run: |
+          REVISION=$(git rev-list ${{ env.VERSION_START_SHA }}..HEAD --count)
+          VERSION_MAJOR=$(grep -Eo "VP_VERSION_MAJOR\s+[0-9]+" src/core/vpversion.h | grep -Eo "[0-9]+")
+          VERSION_MINOR=$(grep -Eo "VP_VERSION_MINOR\s+[0-9]+" src/core/vpversion.h | grep -Eo "[0-9]+")
+          VERSION_REV=$(grep -Eo "VP_VERSION_REV\s+[0-9]+" src/core/vpversion.h | grep -Eo "[0-9]+")
+          VERSION_SHORT="${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_REV}"
+          SHA_SHORT=$(git rev-parse --short "${GITHUB_SHA}")
+          echo "revision=${REVISION}" >> $GITHUB_OUTPUT
+          echo "version_full=${VERSION_SHORT}.${REVISION}" >> $GITHUB_OUTPUT
+          echo "sha_short=${SHA_SHORT}" >> $GITHUB_OUTPUT
+          echo "tag=${VERSION_SHORT}-${REVISION}-${SHA_SHORT}" >> $GITHUB_OUTPUT
+      - name: Calculate external cache hash
+        run: |
+          echo "EXT_HASH=$(cat platforms/config.sh platforms/android-arm64-v8a/external.sh | sha256sum | cut -c1-12)" >> $GITHUB_ENV
+      - name: Restore external cache
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: external
+          key: android-arm64-v8a-${{ env.BUILD_CONFIG }}-external-${{ env.EXT_HASH }}
+          restore-keys: |
+            android-arm64-v8a-${{ env.BUILD_CONFIG }}-external-
+      - name: Build external cache
+        run: |
+          BUILD_TYPE=${{ env.BUILD_CONFIG }} ./platforms/android-arm64-v8a/external.sh
+      - if: steps.cache.outputs.cache-hit != 'true'
+        name: Clean external cache
+        run: |
+          find external -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true
+          find external -name "*.tar.gz" -delete 2>/dev/null || true
+          find external \( -name "*.o" -o -name "*.obj" \) -delete 2>/dev/null || true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        name: Save external cache
+        uses: actions/cache/save@v5
+        with:
+          path: external
+          key: android-arm64-v8a-${{ env.BUILD_CONFIG }}-external-${{ env.EXT_HASH }}
+      - name: Set version
+        run: |
+          perl -i -pe"s/9999/${{ steps.version.outputs.revision }}/g" src/core/git_version.h
+          perl -i -pe"s/unknown/${{ steps.version.outputs.sha_short }}/g" src/core/git_version.h
+      - name: Build libvpinball
+        run: |
+          cmake \
+                -DPLATFORM=android \
+                -DARCH=arm64-v8a \
+                -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }} \
+                -DENABLE_XR=ON \
+                -B build/android-arm64-v8a
+          cmake --build build/android-arm64-v8a -- -j$(nproc)
+      - name: Build libvrshell
+        run: |
+          ./standalone/android/vrshell/build.sh
+      - name: Build app
+        run: |
+          # No release keystore here: sign with a throwaway key. An APK signed this way can't be
+          # installed over one signed with another key (uninstall the old one first).
+          export ANDROID_KEYSTORE_PASSWORD=vpinball
+          export ANDROID_KEY_ALIAS=vpinball
+          export ANDROID_KEY_PASSWORD=vpinball
+          cd standalone/android
+          keytool -genkey -v -keystore app/vpinball.jks \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+                -keypass "$ANDROID_KEY_PASSWORD" \
+                -alias "$ANDROID_KEY_ALIAS" \
+                -dname "CN=VPinball Android, O=VPinball, C=XX"
+          ./gradlew \
+            assembleVr${{ env.BUILD_CONFIG }} \
+            -PversionName="${{ steps.version.outputs.version_full }}" \
+            -Psha_short="${{ steps.version.outputs.sha_short }}"
+      - name: Stage apk
+        run: |
+          mkdir tmp-apk
+          cp standalone/android/app/build/outputs/apk/vr/release/*.apk tmp-apk/VPinballX_BGFX-${{ steps.version.outputs.tag }}-android-vr-Release.apk
+      - name: Upload apk
+        uses: actions/upload-artifact@v7
+        with:
+          name: VPinballX_BGFX-${{ steps.version.outputs.tag }}-android-vr-Release-apk
+          path: tmp-apk/*
+          archive: false
