@@ -41,11 +41,12 @@ jobs:
       - id: version
         name: Version
         run: |
-          # The upstream start commit is not in this fork's history: fall back to the plain commit count
+          # The upstream start commit is not in this fork's history: fall back to the plain commit count,
+          # kept within the 0-9999 build number range that build.gradle.kts accepts
           if git cat-file -e "${{ env.VERSION_START_SHA }}^{commit}" 2>/dev/null; then
             REVISION=$(git rev-list ${{ env.VERSION_START_SHA }}..HEAD --count)
           else
-            REVISION=$(git rev-list HEAD --count)
+            REVISION=$(( $(git rev-list HEAD --count) % 10000 ))
           fi
           VERSION_MAJOR=$(grep -Eo "VP_VERSION_MAJOR\s+[0-9]+" src/core/vpversion.h | grep -Eo "[0-9]+")
           VERSION_MINOR=$(grep -Eo "VP_VERSION_MINOR\s+[0-9]+" src/core/vpversion.h | grep -Eo "[0-9]+")
